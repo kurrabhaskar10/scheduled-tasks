@@ -9,8 +9,8 @@ import os
 # To generate an App Password: Google Account → Security → App Passwords.
 #my_email = os.getenv('MY_EMAIL')
 #password = os.getenv('MY_EMAIL_PSWRD')
-from dotenv import load_dotenv
-load_dotenv()
+#from dotenv import load_dotenv
+#load_dotenv()
 my_email = os.getenv('MY_EMAIL')
 password = os.getenv('MY_EMAIL_PSWRD')
 #my_email = "kurra.bhaskar10@gmail.com"
