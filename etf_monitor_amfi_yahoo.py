@@ -50,27 +50,27 @@ ETF_REGISTRY: dict[str, dict] = {
     "MAFANG": {
         "isin": "INF769K01HF4",
         "name": "Mirae Asset NYSE FANG+ ETF",
-        "threshold_pct": 30.0,        # alert when |diff| <= this %
+        "threshold_pct": 10.0,        # alert when |diff| <= this %
     },
     "MASPTOP50": {
         "isin": "INF769K01HP3",
         "name": "Mirae Asset S&P 500 Top 50 ETF",
-        "threshold_pct": 30.0,
+        "threshold_pct": 10.0,
     },
     "MAHKTECH": {
         "isin": "INF769K01HS7",
         "name": "Mirae Asset Hang Seng TECH ETF",
-        "threshold_pct": 30.0,
+        "threshold_pct": 10.0,
     },
     "HNGSNGBEES": {
         "isin": "INF204KB19I1",
         "name": "Nippon India ETF Hang Seng BeES",
-        "threshold_pct": 30.0,
+        "threshold_pct": 10.0,
     },
     "MON100": {
         "isin": "INF247L01AP3",
         "name": "Motilal Oswal NASDAQ 100 ETF",
-        "threshold_pct": 30.0,
+        "threshold_pct": 10.0,
     },
 }
 
@@ -97,7 +97,7 @@ CONFIG = {
 
     # ── SMS via Twilio ────────────────────────────────────────────────────
     "sms": {
-        "enabled":     True,
+        "enabled":     False,
         "account_sid": "AC121419facad76572a7ee9ec768876aa8",
         "auth_token":  "fcdefc1a48759ccbf173699189a446c4",
         "from_number": "+12025586449",
