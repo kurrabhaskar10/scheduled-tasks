@@ -2,12 +2,15 @@ from datetime import datetime
 import pandas
 import random
 import smtplib
+import os
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Your Gmail address and App Password (NOT your regular Gmail password).
 # To generate an App Password: Google Account → Security → App Passwords.
-my_email = "kurra.bhaskar10@gmail.com"
-password = "xlui blcb tmpx ufro"
+my_email = os.getenv('MY_EMAIL')
+password = os.getenv('MY_EMAIL_PSWRD')
+#my_email = "kurra.bhaskar10@gmail.com"
+#password = "xlui blcb tmpx ufro"
 
 # ─── Get today's date ─────────────────────────────────────────────────────────
 # datetime.now() gives the current date and time.
