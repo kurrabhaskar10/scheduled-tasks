@@ -35,6 +35,7 @@ from pathlib import Path
 
 import requests
 import yfinance as yf
+import os
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ETF REGISTRY
