@@ -80,7 +80,7 @@ ETF_REGISTRY: dict[str, dict] = {
 
 CONFIG = {
     # Seconds between each full poll cycle (all ETFs)
-    "poll_interval_seconds": 300,
+    "poll_interval_seconds": 7200,
 
     # Where to cache last known values (per ETF) across restarts
     "cache_file": "etf_cache.json",
