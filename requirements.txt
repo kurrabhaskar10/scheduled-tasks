@@ -1,3 +1,6 @@
 pandas
 python-dotenv
 requests
+yfinance
+twilio
+python-dotenv
