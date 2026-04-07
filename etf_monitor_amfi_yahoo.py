@@ -45,7 +45,8 @@ import os
 # The script uses ISINs to look up NAV in the AMFI file, so it never
 # depends on a hardcoded scheme code that could go stale.
 # ─────────────────────────────────────────────────────────────────────────────
-
+my_email = os.getenv('MY_EMAIL')
+my_password = os.getenv('MY_EMAIL_PSWRD') 
 ETF_REGISTRY: dict[str, dict] = {
     "MAFANG": {
         "isin": "INF769K01HF4",
@@ -90,9 +91,9 @@ CONFIG = {
         "enabled":         True,
         "smtp_host":       "smtp.gmail.com",
         "smtp_port":       587,
-        "sender_email":    "kurra.bhaskar10@gmail.com",
-        "sender_password": "xlui blcb tmpx ufro",  #Gmail App Password
-        "recipient_email": "kurra.bhaskar10@gmail.com",
+        "sender_email":    my_email,
+        "sender_password": my_password,  #Gmail App Password
+        "recipient_email": my_email,
     },
 
     # ── SMS via Twilio ────────────────────────────────────────────────────
