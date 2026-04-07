@@ -47,6 +47,11 @@ import os
 # ─────────────────────────────────────────────────────────────────────────────
 my_email = os.getenv('MY_EMAIL')
 my_password = os.getenv('MY_EMAIL_PSWRD') 
+twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+twilio_number = os.getenv('TWILIO_NUMBER')
+twilio_to_number = os.getenv('TWILIO_TO_NUMBER')
+twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+
 ETF_REGISTRY: dict[str, dict] = {
     "MAFANG": {
         "isin": "INF769K01HF4",
@@ -98,11 +103,11 @@ CONFIG = {
 
     # ── SMS via Twilio ────────────────────────────────────────────────────
     "sms": {
-        "enabled":     False,
-        "account_sid": "AC121419facad76572a7ee9ec768876aa8",
-        "auth_token":  "fcdefc1a48759ccbf173699189a446c4",
-        "from_number": "+12025586449",
-        "to_number":   "+919094085810",
+        "enabled":     True,
+        "account_sid": TWILIO_ACCOUNT_SID,
+        "auth_token":  TWILIO_AUTH_TOKEN,
+        "from_number": TWILIO_NUMBER,
+        "to_number":   TWILIO_TO_NUMBER,
     },
 }
 
