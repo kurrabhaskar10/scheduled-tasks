@@ -13,8 +13,6 @@ import os
 #load_dotenv()
 my_email = os.getenv('MY_EMAIL')
 password = os.getenv('MY_EMAIL_PSWRD')
-#my_email = "kurra.bhaskar10@gmail.com"
-#password = "xlui blcb tmpx ufro"
 
 # ─── Get today's date ─────────────────────────────────────────────────────────
 # datetime.now() gives the current date and time.
