@@ -104,10 +104,10 @@ CONFIG = {
     # ── SMS via Twilio ────────────────────────────────────────────────────
     "sms": {
         "enabled":     True,
-        "account_sid": TWILIO_ACCOUNT_SID,
-        "auth_token":  TWILIO_AUTH_TOKEN,
-        "from_number": TWILIO_NUMBER,
-        "to_number":   TWILIO_TO_NUMBER,
+        "account_sid": twilio_account_sid,
+        "auth_token":  twilio_auth_token,
+        "from_number": twilio_number,
+        "to_number":   twilio_to_number,
     },
 }
 
