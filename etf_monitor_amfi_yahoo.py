@@ -47,10 +47,10 @@ import os
 # ─────────────────────────────────────────────────────────────────────────────
 my_email = os.getenv('MY_EMAIL')
 my_password = os.getenv('MY_EMAIL_PSWRD') 
-twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID_NEW')
 twilio_number = os.getenv('TWILIO_NUMBER')
-twilio_to_number = os.getenv('TWILIO_TO_NUMBER')
-twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+twilio_to_number = os.getenv('TWILIO_TO_NUMBER_NEW')
+twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN_NEW')
 
 ETF_REGISTRY: dict[str, dict] = {
     "MAFANG": {
