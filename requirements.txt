@@ -4,3 +4,4 @@ requests
 yfinance
 twilio
 python-dotenv
+openpyxl
