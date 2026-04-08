@@ -1,0 +1,31 @@
+
+name: Daily Multi ETF monitor Emailer
+
+on:
+  schedule:
+    - cron: '30 2 * * *'  # Runs daily at 2:30 UTC
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  send-etfalerts-emails:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install yfinance requests  # add all your modules here    
+    - name: Run Multi ETF Monitor emailer
+      env:
+        MY_EMAIL: ${{ secrets.MY_EMAIL }}
+        MY_EMAIL_PSWRD: ${{ secrets.MY_EMAIL_PSWRD }}
+      run: python multi_etf_data_amfi.py
