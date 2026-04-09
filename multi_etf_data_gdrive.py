@@ -1,25 +1,31 @@
 """
-Multi-ETF iNAV vs LTP Alert System  (Excel-integrated edition)
-===============================================================
-Reads ETF symbols from an Excel file, fetches live/declared data,
-and writes the following columns back to the SAME file:
+Multi-ETF iNAV vs LTP Alert System  (GitHub Actions + Google Drive edition)
+============================================================================
+Reads ETF symbols from an Excel file stored in Google Drive, fetches live/
+declared data, writes results back, and pushes the updated file to Drive.
 
-  LTP | Expense Ratio | 52W High | 52W Low | Rise from 52W Low |
-  Fall from 52W High | Beta | PEG Ratio | P/E Ratio | Volume
+Designed to run as a single-cycle script triggered by GitHub Actions every
+2 hours. No while-loop — GitHub Actions handles the scheduling.
 
-A separate sheet ("PE History") accumulates a timestamped P/E snapshot
-each run, enabling month-over-month P/E comparison on a third sheet
-("PE Comparison").
-
-Expected input Excel layout (Sheet1 / first sheet):
+Expected input Excel layout (Sheet "ETF Data"):
   Column A  – ETF Symbol (NSE, e.g. MAFANG)   ← required
   Column B  – ISIN                              ← required
   Column C  – Name (optional, filled if blank)
   Column D  – Threshold % (optional, defaults to 15.0)
   Columns E onward → written by this script (overwritten each run)
 
+GitHub Secrets required:
+  GDRIVE_FILE_ID               – Google Drive file ID of the Excel file
+  GDRIVE_SERVICE_ACCOUNT_JSON  – Full contents of the service account JSON key
+  MY_EMAIL                     – Gmail address for alerts
+  MY_EMAIL_PSWRD               – Gmail app password
+  TWILIO_ACCOUNT_SID_NEW       – Twilio account SID
+  TWILIO_NUMBER                – Twilio from-number
+  TWILIO_TO_NUMBER_NEW         – Twilio to-number
+  TWILIO_AUTH_TOKEN_NEW        – Twilio auth token
+
 Dependencies:
-    pip install requests yfinance openpyxl
+    pip install requests yfinance openpyxl google-api-python-client google-auth
 """
 
 import json
@@ -27,7 +33,8 @@ import time
 import smtplib
 import logging
 import os
-from datetime import datetime, date, time as dtime
+import io
+from datetime import datetime, time as dtime
 from pathlib import Path
 
 import requests
@@ -35,75 +42,45 @@ import yfinance as yf
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-# pip install google-api-python-client google-auth
-import os
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from google.oauth2 import service_account
-import io
 
-DRIVE_FILE_ID = os.getenv("GDRIVE_FILE_ID")   # stored as GitHub Secret
-GDRIVE_CREDS  = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")  # JSON string as GitHub Secret
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING  (set up first so helpers below can use it)
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _get_drive_service():
-    import json
-    creds_dict = json.loads(GDRIVE_CREDS)
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/drive.file"]
-    )
-    return build("drive", "v3", credentials=creds)
-
-
-def download_excel_from_drive(local_path: str):
-    """Download the Excel file from Drive to local runner before processing."""
-    service = _get_drive_service()
-    request = service.files().get_media(fileId=DRIVE_FILE_ID)
-    with open(local_path, "wb") as f:
-        downloader = MediaIoBaseDownload(f, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-    log.info("Downloaded Excel from Google Drive → %s", local_path)
-
-
-def upload_excel_to_drive(local_path: str):
-    """Upload the updated Excel file back to the same Drive file (overwrites)."""
-    service = _get_drive_service()
-    media = MediaFileUpload(
-        local_path,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        resumable=True
-    )
-    service.files().update(
-        fileId=DRIVE_FILE_ID,
-        media_body=media
-    ).execute()
-    log.info("Uploaded updated Excel back to Google Drive (file ID: %s)", DRIVE_FILE_ID)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENV / CREDENTIALS
 # ─────────────────────────────────────────────────────────────────────────────
 
-my_email            = os.getenv("MY_EMAIL")
-my_password         = os.getenv("MY_EMAIL_PSWRD")
-twilio_account_sid  = os.getenv("TWILIO_ACCOUNT_SID_NEW")
-twilio_number       = os.getenv("TWILIO_NUMBER")
-twilio_to_number    = os.getenv("TWILIO_TO_NUMBER_NEW")
-twilio_auth_token   = os.getenv("TWILIO_AUTH_TOKEN_NEW")
+DRIVE_FILE_ID = os.getenv("GDRIVE_FILE_ID", "").strip()
+GDRIVE_CREDS  = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
+
+my_email           = os.getenv("MY_EMAIL", "").strip()
+my_password        = os.getenv("MY_EMAIL_PSWRD", "").strip()
+twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID_NEW", "").strip()
+twilio_number      = os.getenv("TWILIO_NUMBER", "").strip()
+twilio_to_number   = os.getenv("TWILIO_TO_NUMBER_NEW", "").strip()
+twilio_auth_token  = os.getenv("TWILIO_AUTH_TOKEN_NEW", "").strip()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
 CONFIG = {
-    "excel_file":             "etf_data_amfi1.xlsx",       # path to input/output Excel
-    "poll_interval_seconds":  7200,
-    "cache_file":             "etf_cache.json",
-    "default_threshold_pct":  15.0,
-
+    "excel_file":            "etf_data_amfi1.xlsx",   # local temp filename on runner
+    "cache_file":            "etf_cache.json",
+    "default_threshold_pct": 15.0,
     "email": {
-        "enabled":         True,
+        "enabled":         bool(my_email and my_password),
         "smtp_host":       "smtp.gmail.com",
         "smtp_port":       587,
         "sender_email":    my_email,
@@ -111,7 +88,7 @@ CONFIG = {
         "recipient_email": my_email,
     },
     "sms": {
-        "enabled":     True,
+        "enabled":     bool(twilio_account_sid and twilio_auth_token),
         "account_sid": twilio_account_sid,
         "auth_token":  twilio_auth_token,
         "from_number": twilio_number,
@@ -143,37 +120,107 @@ OUTPUT_COLS = [
 ]
 
 # Fixed input columns
-COL_SYMBOL    = 1   # A
-COL_ISIN      = 2   # B
-COL_NAME      = 3   # C
-COL_THRESHOLD = 4   # D
-COL_OUTPUT_START = 5  # E
+COL_SYMBOL       = 1   # A
+COL_ISIN         = 2   # B
+COL_NAME         = 3   # C
+COL_THRESHOLD    = 4   # D
+COL_OUTPUT_START = 5   # E
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logging
+# GOOGLE DRIVE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(__name__)
+def _get_drive_service():
+    """
+    Build and return an authenticated Google Drive service client.
+    Raises RuntimeError with a clear message if credentials are missing or invalid.
+    """
+    if not GDRIVE_CREDS:
+        raise RuntimeError(
+            "GDRIVE_SERVICE_ACCOUNT_JSON secret is empty or not set.\n"
+            "Fix: GitHub repo → Settings → Secrets and variables → Actions → "
+            "confirm GDRIVE_SERVICE_ACCOUNT_JSON exists and is not empty.\n"
+            "Also confirm the workflow env: block passes it to the run step."
+        )
+
+    try:
+        creds_dict = json.loads(GDRIVE_CREDS)
+    except json.JSONDecodeError as e:
+        preview = repr(GDRIVE_CREDS[:120])
+        raise RuntimeError(
+            f"GDRIVE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}\n"
+            f"First 120 chars received: {preview}\n"
+            "Fix: paste the entire contents of the service account .json file "
+            "as the secret value — no extra quotes, no truncation."
+        ) from e
+
+    if not DRIVE_FILE_ID:
+        raise RuntimeError(
+            "GDRIVE_FILE_ID secret is empty or not set.\n"
+            "Fix: copy the file ID from the Google Drive share URL "
+            "(the long string between /d/ and /view) and add it as a GitHub secret."
+        )
+
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+    return build("drive", "v3", credentials=creds)
+
+
+def download_excel_from_drive(local_path: str):
+    """
+    Download the Excel file from Google Drive to the local runner.
+    Must be called before load_etf_registry().
+    """
+    log.info("Downloading Excel from Google Drive (file ID: %s) ...", DRIVE_FILE_ID)
+    service = _get_drive_service()
+    request = service.files().get_media(fileId=DRIVE_FILE_ID)
+    with open(local_path, "wb") as f:
+        downloader = MediaIoBaseDownload(f, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                log.info("  Download progress: %d%%", int(status.progress() * 100))
+    log.info("Download complete → %s", local_path)
+
+
+def upload_excel_to_drive(local_path: str):
+    """
+    Upload the updated Excel file back to the same Google Drive file (overwrites).
+    Must be called after write_results_to_excel().
+    """
+    log.info("Uploading updated Excel to Google Drive (file ID: %s) ...", DRIVE_FILE_ID)
+    service = _get_drive_service()
+    media = MediaFileUpload(
+        local_path,
+        mimetype=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        resumable=True,
+    )
+    service.files().update(
+        fileId=DRIVE_FILE_ID,
+        media_body=media,
+    ).execute()
+    log.info("Upload complete. Excel updated in Google Drive.")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Excel helpers
+# EXCEL STYLE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-HEADER_FILL   = PatternFill("solid", fgColor="1F4E79")
-HEADER_FONT   = Font(bold=True, color="FFFFFF", name="Arial", size=10)
-DATA_FONT     = Font(name="Arial", size=10)
-ALT_FILL      = PatternFill("solid", fgColor="D6E4F0")
-BORDER_THIN   = Border(
+HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
+HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+DATA_FONT   = Font(name="Arial", size=10)
+ALT_FILL    = PatternFill("solid", fgColor="D6E4F0")
+BORDER_THIN = Border(
     left=Side(style="thin"), right=Side(style="thin"),
     top=Side(style="thin"),  bottom=Side(style="thin"),
 )
-CENTER        = Alignment(horizontal="center", vertical="center")
-LEFT          = Alignment(horizontal="left",   vertical="center")
+CENTER = Alignment(horizontal="center", vertical="center")
+LEFT   = Alignment(horizontal="left",   vertical="center")
+
 
 def _style_header(cell, text):
     cell.value     = text
@@ -182,12 +229,14 @@ def _style_header(cell, text):
     cell.alignment = CENTER
     cell.border    = BORDER_THIN
 
+
 def _style_data(cell, value, alt_row=False):
     cell.value     = value
     cell.font      = DATA_FONT
     cell.fill      = ALT_FILL if alt_row else PatternFill()
     cell.alignment = CENTER
     cell.border    = BORDER_THIN
+
 
 def _autofit(ws, min_width=12, max_width=30):
     for col in ws.columns:
@@ -198,36 +247,38 @@ def _autofit(ws, min_width=12, max_width=30):
         ws.column_dimensions[get_column_letter(col[0].column)].width = \
             max(min_width, min(length + 4, max_width))
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Read ETF registry from Excel
+# READ ETF REGISTRY FROM EXCEL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_etf_registry(excel_path: str) -> dict:
     """
     Read ETF symbols, ISINs, names, and thresholds from the Excel file.
-    Creates the file with a template if it doesn't exist.
+    Creates a template file if it doesn't exist (first-run scenario).
     Returns {symbol: {isin, name, threshold_pct, row}} dict.
     """
     p = Path(excel_path)
     if not p.exists():
         _create_template_excel(excel_path)
-        log.warning("Created template Excel at %s — populate it and restart.", excel_path)
+        log.warning(
+            "No Excel found locally — created template at %s. "
+            "Populate it, upload to Drive, then re-run.", excel_path
+        )
         return {}
 
     wb = openpyxl.load_workbook(excel_path)
     ws = wb[MAIN_SHEET] if MAIN_SHEET in wb.sheetnames else wb.active
 
     registry = {}
-    for row in range(2, ws.max_row + 1):   # row 1 = header
+    for row in range(2, ws.max_row + 1):
         symbol = ws.cell(row=row, column=COL_SYMBOL).value
         isin   = ws.cell(row=row, column=COL_ISIN).value
         if not symbol or not isin:
             continue
-        symbol = str(symbol).strip().upper()
-        isin   = str(isin).strip()
-        name   = ws.cell(row=row, column=COL_NAME).value or symbol
-        thr_v  = ws.cell(row=row, column=COL_THRESHOLD).value
+        symbol    = str(symbol).strip().upper()
+        isin      = str(isin).strip()
+        name      = ws.cell(row=row, column=COL_NAME).value or symbol
+        thr_v     = ws.cell(row=row, column=COL_THRESHOLD).value
         threshold = float(thr_v) if thr_v else CONFIG["default_threshold_pct"]
         registry[symbol] = {
             "isin":          isin,
@@ -240,28 +291,25 @@ def load_etf_registry(excel_path: str) -> dict:
 
 
 def _create_template_excel(excel_path: str):
-    """Create a blank template so users know the expected layout."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
+    """Create a blank template with sample rows and all required sheets."""
+    wb  = openpyxl.Workbook()
+    ws  = wb.active
     ws.title = MAIN_SHEET
-    headers = ["Symbol", "ISIN", "Name", "Alert Threshold (%)"] + OUTPUT_COLS
+    headers  = ["Symbol", "ISIN", "Name", "Alert Threshold (%)"] + OUTPUT_COLS
     for c, h in enumerate(headers, 1):
         _style_header(ws.cell(row=1, column=c), h)
-    # Sample rows
     samples = [
-        ("MAFANG",     "INF769K01HF4", "Mirae Asset NYSE FANG+ ETF",        15.0),
-        ("MASPTOP50",  "INF769K01HP3", "Mirae Asset S&P 500 Top 50 ETF",    15.0),
-        ("MAHKTECH",   "INF769K01HS7", "Mirae Asset Hang Seng TECH ETF",     15.0),
-        ("HNGSNGBEES", "INF204KB19I1", "Nippon India ETF Hang Seng BeES",    15.0),
-        ("MON100",     "INF247L01AP3", "Motilal Oswal NASDAQ 100 ETF",       15.0),
+        ("MAFANG",     "INF769K01HF4", "Mirae Asset NYSE FANG+ ETF",       15.0),
+        ("MASPTOP50",  "INF769K01HP3", "Mirae Asset S&P 500 Top 50 ETF",   15.0),
+        ("MAHKTECH",   "INF769K01HS7", "Mirae Asset Hang Seng TECH ETF",    15.0),
+        ("HNGSNGBEES", "INF204KB19I1", "Nippon India ETF Hang Seng BeES",   15.0),
+        ("MON100",     "INF247L01AP3", "Motilal Oswal NASDAQ 100 ETF",      15.0),
     ]
     for r, (sym, isin, name, thr) in enumerate(samples, 2):
         ws.cell(row=r, column=1).value = sym
         ws.cell(row=r, column=2).value = isin
         ws.cell(row=r, column=3).value = name
         ws.cell(row=r, column=4).value = thr
-
-    # Create PE History and Comparison sheets
     _ensure_pe_sheets(wb)
     _autofit(ws)
     wb.save(excel_path)
@@ -273,7 +321,6 @@ def _ensure_pe_sheets(wb: openpyxl.Workbook):
         ws = wb.create_sheet(PE_HIST_SHEET)
         for c, h in enumerate(["Run Date", "Symbol", "Name", "P/E Ratio"], 1):
             _style_header(ws.cell(row=1, column=c), h)
-
     if PE_CMP_SHEET not in wb.sheetnames:
         ws = wb.create_sheet(PE_CMP_SHEET)
         for c, h in enumerate(
@@ -281,22 +328,16 @@ def _ensure_pe_sheets(wb: openpyxl.Workbook):
         ):
             _style_header(ws.cell(row=1, column=c), h)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Write results back to Excel
+# WRITE RESULTS BACK TO EXCEL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def write_results_to_excel(excel_path: str, registry: dict, results: dict):
-    """
-    results = {symbol: {ltp, expense_ratio, high_52w, low_52w, beta, peg,
-                         pe, volume, nav, nav_date, diff_pct, is_live}}
-    """
     wb = openpyxl.load_workbook(excel_path)
 
     # ── MAIN SHEET ────────────────────────────────────────────────────────
     ws = wb[MAIN_SHEET] if MAIN_SHEET in wb.sheetnames else wb.active
 
-    # Write / refresh column headers
     fixed_headers = ["Symbol", "ISIN", "Name", "Alert Threshold (%)"]
     all_headers   = fixed_headers + OUTPUT_COLS
     for c, h in enumerate(all_headers, 1):
@@ -305,14 +346,14 @@ def write_results_to_excel(excel_path: str, registry: dict, results: dict):
     ws.freeze_panes = "A2"
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for symbol, meta in registry.items():
-        row   = meta["row"]
-        r     = results.get(symbol, {})
-        alt   = (row % 2 == 0)
 
-        ltp          = r.get("ltp")
-        high_52w     = r.get("high_52w")
-        low_52w      = r.get("low_52w")
+    for symbol, meta in registry.items():
+        row        = meta["row"]
+        r          = results.get(symbol, {})
+        alt        = (row % 2 == 0)
+        ltp        = r.get("ltp")
+        high_52w   = r.get("high_52w")
+        low_52w    = r.get("low_52w")
         rise_from_low = (
             round((ltp - low_52w) / low_52w * 100, 2)
             if ltp and low_52w else None
@@ -321,33 +362,28 @@ def write_results_to_excel(excel_path: str, registry: dict, results: dict):
             round((high_52w - ltp) / high_52w * 100, 2)
             if ltp and high_52w else None
         )
-
         values = [
-            _fmt(ltp,                "₹"),
+            _fmt(ltp,                    "₹"),
             _fmt(r.get("expense_ratio"), "%"),
-            _fmt(high_52w,           "₹"),
-            _fmt(low_52w,            "₹"),
-            _fmt(rise_from_low,      "%"),
-            _fmt(fall_from_high,     "%"),
+            _fmt(high_52w,               "₹"),
+            _fmt(low_52w,                "₹"),
+            _fmt(rise_from_low,          "%"),
+            _fmt(fall_from_high,         "%"),
             _fmt(r.get("beta")),
             _fmt(r.get("peg")),
             _fmt(r.get("pe")),
-            _fmt(r.get("volume"),    fmt="int"),
-            _fmt(r.get("nav"),       "₹"),
+            _fmt(r.get("volume"),        fmt="int"),
+            _fmt(r.get("nav"),           "₹"),
             r.get("nav_date", "N/A"),
-            _fmt(r.get("diff_pct"),  "%"),
+            _fmt(r.get("diff_pct"),      "%"),
             now_str,
         ]
-
-        # Fill fixed columns with styles
         for c in range(1, 5):
-            cell = ws.cell(row=row, column=c)
+            cell           = ws.cell(row=row, column=c)
             cell.font      = DATA_FONT
             cell.fill      = ALT_FILL if alt else PatternFill()
             cell.alignment = LEFT
             cell.border    = BORDER_THIN
-
-        # Fill output columns
         for i, val in enumerate(values):
             _style_data(ws.cell(row=row, column=COL_OUTPUT_START + i), val, alt)
 
@@ -355,7 +391,7 @@ def write_results_to_excel(excel_path: str, registry: dict, results: dict):
 
     # ── PE HISTORY SHEET ─────────────────────────────────────────────────
     _ensure_pe_sheets(wb)
-    ws_hist = wb[PE_HIST_SHEET]
+    ws_hist  = wb[PE_HIST_SHEET]
     run_date = datetime.now().strftime("%Y-%m-%d %H:%M")
     hist_row = ws_hist.max_row + 1
     for symbol, r in results.items():
@@ -367,44 +403,38 @@ def write_results_to_excel(excel_path: str, registry: dict, results: dict):
         ws_hist.cell(row=hist_row, column=3).value = registry[symbol]["name"]
         ws_hist.cell(row=hist_row, column=4).value = pe
         hist_row += 1
-
     _autofit(ws_hist)
 
     # ── PE COMPARISON SHEET ───────────────────────────────────────────────
     _write_pe_comparison(wb, registry, results)
 
     wb.save(excel_path)
-    log.info("Excel updated: %s", excel_path)
+    log.info("Excel saved locally: %s", excel_path)
 
 
 def _write_pe_comparison(wb, registry, results):
-    """Compare current P/E vs the closest run from ~30 days ago."""
     ws_hist = wb[PE_HIST_SHEET]
     ws_cmp  = wb[PE_CMP_SHEET]
 
-    # Clear old comparison data (keep header row 1)
     for row in ws_cmp.iter_rows(min_row=2):
         for cell in row:
             cell.value = None
 
-    # Build history: {symbol: [(date, pe), ...]}
     history: dict[str, list] = {}
     for row in ws_hist.iter_rows(min_row=2, values_only=True):
         if not row[0]:
             continue
-        run_dt = row[0]
-        sym    = row[1]
-        pe_val = row[3]
+        run_dt, sym, _, pe_val = row[0], row[1], row[2], row[3]
         if sym and pe_val is not None:
             history.setdefault(sym, []).append((run_dt, float(pe_val)))
 
-    today = datetime.now()
+    today   = datetime.now()
     cmp_row = 2
     for symbol, meta in registry.items():
-        current_pe = results.get(symbol, {}).get("pe")
+        current_pe    = results.get(symbol, {}).get("pe")
         last_month_pe = _find_closest_pe(history.get(symbol, []), today, days_ago=30)
-        change     = None
-        change_pct = None
+        change        = None
+        change_pct    = None
         if current_pe is not None and last_month_pe is not None:
             change     = round(current_pe - last_month_pe, 4)
             change_pct = round(change / last_month_pe * 100, 2) if last_month_pe else None
@@ -421,35 +451,27 @@ def _write_pe_comparison(wb, registry, results):
         for c, v in enumerate(row_vals, 1):
             _style_data(ws_cmp.cell(row=cmp_row, column=c), v, alt)
 
-        # Colour change cell: green = improved (lower P/E), red = worse (higher P/E)
         if change is not None:
-            cell = ws_cmp.cell(row=cmp_row, column=5)
+            cell      = ws_cmp.cell(row=cmp_row, column=5)
             cell.font = Font(
-                name="Arial", size=10,
+                name="Arial", size=10, bold=True,
                 color="006100" if change < 0 else ("9C0006" if change > 0 else "000000"),
-                bold=True,
             )
-
         cmp_row += 1
 
     _autofit(ws_cmp)
-
-    # Re-write headers (they may have been cleared)
     for c, h in enumerate(
         ["Symbol", "Name", "P/E (This Run)", "P/E (Last Month)", "Change", "Change (%)"], 1
     ):
         _style_header(ws_cmp.cell(row=1, column=c), h)
 
 
-def _find_closest_pe(history: list, reference: datetime, days_ago: int) -> float | None:
-    """Find the PE value from the entry closest to (reference - days_ago)."""
+def _find_closest_pe(history: list, reference: datetime, days_ago: int):
     if not history:
         return None
-    target = reference.replace(hour=0, minute=0, second=0)
     from datetime import timedelta
-    target -= timedelta(days=days_ago)
-
-    best = None
+    target     = reference.replace(hour=0, minute=0, second=0) - timedelta(days=days_ago)
+    best       = None
     best_delta = None
     for run_dt, pe in history:
         if isinstance(run_dt, str):
@@ -462,7 +484,7 @@ def _find_closest_pe(history: list, reference: datetime, days_ago: int) -> float
         delta = abs((dt - target).total_seconds())
         if best_delta is None or delta < best_delta:
             best_delta = delta
-            best = pe
+            best       = pe
     return best
 
 
@@ -477,9 +499,8 @@ def _fmt(val, unit="", fmt=""):
         return f"{val:+.2f}%" if isinstance(val, float) and val < 0 else f"{val:.2f}%"
     return round(val, 4) if isinstance(val, float) else val
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Market status
+# MARKET STATUS
 # ─────────────────────────────────────────────────────────────────────────────
 
 _NSE_HOLIDAYS = {
@@ -522,21 +543,16 @@ def market_status_label() -> str:
         return "Post-market"
     return "Open"
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# NSE Session  (cookie warm-up required by NSE's anti-bot measures)
+# NSE SESSION  (cookie warm-up required by NSE anti-bot measures)
 # ─────────────────────────────────────────────────────────────────────────────
-# NSE India's API endpoints (api/quote-equity, api/etf) require a valid
-# session cookie obtained by first hitting the NSE homepage. Without it,
-# the API returns 401 or an empty/error JSON. We maintain a single
-# requests.Session, refreshing the cookie at most once every 30 minutes.
 
-_NSE_SESSION: requests.Session | None = None
-_NSE_SESSION_AT: float = 0.0
-_NSE_SESSION_TTL = 1800  # 30 min
+_NSE_SESSION     = None
+_NSE_SESSION_AT  = 0.0
+_NSE_SESSION_TTL = 1800   # 30 min
 
-_NSE_BASE     = "https://www.nseindia.com"
-_NSE_HEADERS  = {
+_NSE_BASE    = "https://www.nseindia.com"
+_NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -549,22 +565,14 @@ _NSE_HEADERS  = {
 
 
 def _get_nse_session() -> requests.Session:
-    """
-    Return a warmed-up NSE session, refreshing the cookie if stale.
-    Warm-up sequence: GET homepage → GET /market-data/exchange-traded-funds-etf
-    Both GETs must succeed to set the required nsit / nseappid cookies.
-    """
     global _NSE_SESSION, _NSE_SESSION_AT
     if _NSE_SESSION and (time.time() - _NSE_SESSION_AT) < _NSE_SESSION_TTL:
         return _NSE_SESSION
-
     session = requests.Session()
     session.headers.update(_NSE_HEADERS)
     try:
-        # Step 1: hit the homepage to get initial cookies (nsit, nseappid)
         session.get(_NSE_BASE, timeout=15)
         time.sleep(1)
-        # Step 2: hit the ETF market-data page to prime the session fully
         session.get(f"{_NSE_BASE}/market-data/exchange-traded-funds-etf", timeout=15)
         time.sleep(0.5)
         _NSE_SESSION    = session
@@ -572,151 +580,82 @@ def _get_nse_session() -> requests.Session:
         log.debug("NSE session refreshed (cookies: %s)", list(session.cookies.keys()))
     except Exception as e:
         log.warning("NSE session warm-up failed: %s", e)
-        _NSE_SESSION = session   # use even if warm-up failed
+        _NSE_SESSION = session
     return _NSE_SESSION
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# iNAV — NSE quote-equity API  (FIXED)
+# iNAV — NSE QUOTE-EQUITY API
 # ─────────────────────────────────────────────────────────────────────────────
-# NSE's per-symbol quote endpoint returns a JSON with metadata.iNavValue
-# for ETF symbols during market hours. This replaces the defunct CSV at
-# archives.nseindia.com/content/equities/ETFINAV.csv.
-#
-# Endpoint:  GET https://www.nseindia.com/api/quote-equity?symbol={SYMBOL}
-# Key path:  response["metadata"]["iNavValue"]   (string, e.g. "163.45")
-#            Also available: response["priceInfo"]["lastPrice"] for LTP cross-check.
-#
-# Note: The endpoint requires valid NSE session cookies (see _get_nse_session).
-#       iNavValue is typically present only during market hours; outside hours
-#       it may be absent or "0" — in that case we fall back to declared NAV.
 
-_NSE_INAV_SYMBOL_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (inav, fetched_at)
-_NSE_INAV_SYMBOL_TTL = 60  # seconds
+_NSE_INAV_SYMBOL_CACHE: dict = {}
+_NSE_INAV_SYMBOL_TTL = 60
 
 
-def fetch_inav_nse(symbol: str) -> float | None:
-    """
-    Fetch live iNAV for an NSE ETF symbol using the NSE quote-equity API.
-    Returns the iNAV as a float, or None if unavailable/zero/invalid.
-
-    The iNavValue field is populated by NSE's calculation agent during
-    market hours only. Outside hours it is either absent or "0".
-    """
+def fetch_inav_nse(symbol: str):
     cached = _NSE_INAV_SYMBOL_CACHE.get(symbol.upper())
     if cached and (time.time() - cached[1]) < _NSE_INAV_SYMBOL_TTL:
         return cached[0] if cached[0] > 0 else None
-
     try:
-        session = _get_nse_session()
-        url = f"{_NSE_BASE}/api/quote-equity?symbol={symbol.upper()}"
-        resp = session.get(url, timeout=15)
+        session  = _get_nse_session()
+        url      = f"{_NSE_BASE}/api/quote-equity?symbol={symbol.upper()}"
+        resp     = session.get(url, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-
-        # iNavValue lives inside the "metadata" block as a string
+        data     = resp.json()
         inav_raw = (
             data.get("metadata", {}).get("iNavValue")
-            or data.get("priceInfo", {}).get("iNavValue")  # fallback key location
+            or data.get("priceInfo", {}).get("iNavValue")
         )
-
         if inav_raw is None:
-            log.debug("NSE quote-equity: iNavValue absent for %s", symbol)
             return None
-
         inav_str = str(inav_raw).replace(",", "").strip()
         if not inav_str or inav_str in ("-", "0", "0.0", "null", "NA", "N/A"):
-            log.debug("NSE quote-equity: iNavValue is zero/null for %s: %r", symbol, inav_raw)
             return None
-
         inav = float(inav_str)
         if inav <= 0:
             return None
-
         _NSE_INAV_SYMBOL_CACHE[symbol.upper()] = (inav, time.time())
         log.debug("NSE iNAV  symbol=%-12s  iNav=%.4f", symbol, inav)
         return inav
-
     except Exception as e:
         log.warning("NSE iNAV fetch failed for %s: %s", symbol, e)
-        # Force session refresh on next call so stale cookies don't persist
         global _NSE_SESSION_AT
         _NSE_SESSION_AT = 0.0
         return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Expense Ratio  (FIXED)
+# EXPENSE RATIO
 # ─────────────────────────────────────────────────────────────────────────────
-# Two-source strategy (both free, no auth required):
-#
-# PRIMARY  — mfdata.in/api/v1/schemes/{amfi_code}
-#   Returns JSON with "expense_ratio" field (float).
-#   Uses the AMFI scheme code resolved via NAVAll.txt (same code used for mfapi).
-#   This is a modern, well-maintained open API with daily updates.
-#
-# FALLBACK — mf.captnemo.in/search?q={isin}
-#   Legacy source; still alive but the ISIN field in the response is uppercase
-#   "ISIN" (not lowercase). The original code was correct about the field name,
-#   but the API sometimes returns no results for ETF ISINs. Used as backup only.
-#
-# Both sources report TER (%) as a decimal, e.g. 0.59 means 0.59%.
 
-_EXPENSE_CACHE: dict[str, float | None] = {}   # isin → expense_ratio or None
-_EXPENSE_FETCHED: dict[str, float]      = {}   # isin → timestamp
-_EXPENSE_TTL = 86400   # TER changes at most monthly; cache for 24 h
+_EXPENSE_CACHE:   dict = {}
+_EXPENSE_FETCHED: dict = {}
+_EXPENSE_TTL = 86400
 
 _MFDATA_BASE  = "https://mfdata.in/api/v1/schemes"
 _CAPTNEMO_URL = "https://mf.captnemo.in/search"
-
 _GENERIC_HEADERS = {
     "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0",
     "Accept-Language": "en-IN,en-US;q=0.9",
 }
 
 
-def fetch_expense_ratio(isin: str) -> float | None:
-    """
-    Returns expense ratio (%) for the given ISIN.
-    Tries mfdata.in first (AMFI-code based), then mf.captnemo.in (ISIN-search).
-    Returns None if unavailable from both sources.
-    """
-    # Cache check
+def fetch_expense_ratio(isin: str):
     if isin in _EXPENSE_CACHE:
         if (time.time() - _EXPENSE_FETCHED.get(isin, 0)) < _EXPENSE_TTL:
             return _EXPENSE_CACHE[isin]
-
-    # ── Source 1: mfdata.in (primary) ────────────────────────────────────
     val = _fetch_expense_mfdata(isin)
-
-    # ── Source 2: mf.captnemo.in (fallback) ──────────────────────────────
     if val is None:
         val = _fetch_expense_captnemo(isin)
-
     _EXPENSE_CACHE[isin]   = val
     _EXPENSE_FETCHED[isin] = time.time()
-    if val is not None:
-        log.debug("Expense ratio  ISIN=%-16s  TER=%.4f%%", isin, val)
-    else:
-        log.debug("Expense ratio  ISIN=%-16s  TER=N/A (both sources failed)", isin)
     return val
 
 
-def _fetch_expense_mfdata(isin: str) -> float | None:
-    """
-    mfdata.in  GET /api/v1/schemes/{amfi_code}
-    Response:  {"status": "success", "data": {"amfi_code": ..., "expense_ratio": 0.59, ...}}
-    Requires resolving ISIN → AMFI scheme code via NAVAll.txt first.
-    """
+def _fetch_expense_mfdata(isin: str):
     scheme_code = _scheme_code_for_isin(isin)
     if not scheme_code:
-        log.debug("mfdata.in: no scheme code for ISIN %s", isin)
         return None
     try:
-        r = requests.get(
-            f"{_MFDATA_BASE}/{scheme_code}",
-            headers=_GENERIC_HEADERS, timeout=15,
-        )
+        r    = requests.get(f"{_MFDATA_BASE}/{scheme_code}", headers=_GENERIC_HEADERS, timeout=15)
         r.raise_for_status()
         body = r.json()
         if body.get("status") == "success":
@@ -726,28 +665,17 @@ def _fetch_expense_mfdata(isin: str) -> float | None:
                 if val > 0:
                     return val
     except Exception as e:
-        log.debug("mfdata.in expense fetch failed (ISIN=%s, code=%s): %s", isin, scheme_code, e)
+        log.debug("mfdata.in expense fetch failed (ISIN=%s): %s", isin, e)
     return None
 
 
-def _fetch_expense_captnemo(isin: str) -> float | None:
-    """
-    mf.captnemo.in  GET /search?q={isin}
-    Response: JSON array of scheme objects; the expense_ratio field is a string.
-    Matches on the "ISIN" key (uppercase) in each item.
-    """
+def _fetch_expense_captnemo(isin: str):
     try:
-        r = requests.get(
-            _CAPTNEMO_URL,
-            params={"q": isin},
-            headers=_GENERIC_HEADERS,
-            timeout=15,
-        )
+        r     = requests.get(_CAPTNEMO_URL, params={"q": isin}, headers=_GENERIC_HEADERS, timeout=15)
         r.raise_for_status()
         items = r.json()
         if isinstance(items, list):
             for item in items:
-                # captnemo uses uppercase "ISIN" key
                 if item.get("ISIN") == isin or item.get("isin") == isin:
                     raw = item.get("expense_ratio") or item.get("expenseRatio")
                     if raw not in (None, "", "null", "0", 0):
@@ -756,23 +684,18 @@ def _fetch_expense_captnemo(isin: str) -> float | None:
         log.debug("captnemo expense fetch failed (ISIN=%s): %s", isin, e)
     return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# AMFI NAVAll.txt — declared NAV by ISIN (24×7 fallback)
+# AMFI NAVAll.txt — DECLARED NAV + SCHEME CODE RESOLUTION
 # ─────────────────────────────────────────────────────────────────────────────
-# Format: SchemeCode ; ISIN_Growth ; ISIN_DivReinvest ; SchemeName ; NAV ; Date
-# Also used to resolve ISIN → AMFI scheme code for mfapi / mfdata lookups.
 
-_AMFI_URL         = "https://www.amfiindia.com/spages/NAVAll.txt"
-_AMFI_TEXT: str | None = None
-_AMFI_FETCHED_AT  = 0.0
-_AMFI_TTL         = 600   # re-fetch at most every 10 min
-
-# AMFI scheme-code cache built once per process from NAVAll.txt
-_ISIN_TO_SCHEME_CODE: dict[str, str] = {}
+_AMFI_URL        = "https://www.amfiindia.com/spages/NAVAll.txt"
+_AMFI_TEXT       = None
+_AMFI_FETCHED_AT = 0.0
+_AMFI_TTL        = 600
+_ISIN_TO_SCHEME_CODE: dict = {}
 
 
-def _get_amfi_text() -> str | None:
+def _get_amfi_text():
     global _AMFI_TEXT, _AMFI_FETCHED_AT
     if _AMFI_TEXT and (time.time() - _AMFI_FETCHED_AT) < _AMFI_TTL:
         return _AMFI_TEXT
@@ -787,8 +710,7 @@ def _get_amfi_text() -> str | None:
     return _AMFI_TEXT
 
 
-def _parse_amfi_line(isin: str) -> tuple[str, float, str] | None:
-    """Return (scheme_code, nav, date) for first line matching isin, or None."""
+def _parse_amfi_line(isin: str):
     text = _get_amfi_text()
     if not text:
         return None
@@ -806,7 +728,7 @@ def _parse_amfi_line(isin: str) -> tuple[str, float, str] | None:
     return None
 
 
-def fetch_nav_amfi_by_isin(isin: str) -> tuple[float, str] | None:
+def fetch_nav_amfi_by_isin(isin: str):
     result = _parse_amfi_line(isin)
     if result:
         _, nav, date = result
@@ -815,8 +737,7 @@ def fetch_nav_amfi_by_isin(isin: str) -> tuple[float, str] | None:
     return None
 
 
-def _scheme_code_for_isin(isin: str) -> str | None:
-    """Resolve ISIN → AMFI scheme code (cached)."""
+def _scheme_code_for_isin(isin: str):
     if isin in _ISIN_TO_SCHEME_CODE:
         return _ISIN_TO_SCHEME_CODE[isin]
     result = _parse_amfi_line(isin)
@@ -826,34 +747,24 @@ def _scheme_code_for_isin(isin: str) -> str | None:
         return code
     return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# mfapi.in — latest declared NAV + scheme metadata
+# mfapi.in — LATEST DECLARED NAV
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MFAPI_BASE = "https://api.mfapi.in/mf"
-_MFAPI_CACHE: dict[str, dict] = {}   # scheme_code → {nav, date, fetched_at}
-_MFAPI_TTL = 600
+_MFAPI_BASE  = "https://api.mfapi.in/mf"
+_MFAPI_CACHE: dict = {}
+_MFAPI_TTL   = 600
 
 
-def fetch_nav_mfapi(isin: str) -> tuple[float, str] | None:
-    """
-    Fetch latest NAV from mfapi.in using ISIN → scheme code resolution.
-    Returns (nav, date_str) or None.
-    """
+def fetch_nav_mfapi(isin: str):
     scheme_code = _scheme_code_for_isin(isin)
     if not scheme_code:
         return None
-
     cached = _MFAPI_CACHE.get(scheme_code)
     if cached and (time.time() - cached["fetched_at"]) < _MFAPI_TTL:
         return cached["nav"], cached["date"]
-
     try:
-        r = requests.get(
-            f"{_MFAPI_BASE}/{scheme_code}/latest",
-            headers=_GENERIC_HEADERS, timeout=15,
-        )
+        r    = requests.get(f"{_MFAPI_BASE}/{scheme_code}/latest", headers=_GENERIC_HEADERS, timeout=15)
         r.raise_for_status()
         body = r.json()
         data = body.get("data", [])
@@ -861,15 +772,13 @@ def fetch_nav_mfapi(isin: str) -> tuple[float, str] | None:
             nav  = float(data[0]["nav"])
             date = data[0]["date"]
             _MFAPI_CACHE[scheme_code] = {"nav": nav, "date": date, "fetched_at": time.time()}
-            log.debug("mfapi NAV  scheme=%s  nav=%.4f  date=%s", scheme_code, nav, date)
             return nav, date
     except Exception as e:
         log.warning("mfapi fetch failed for scheme %s: %s", scheme_code, e)
     return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# BSE live iNAV (market hours, kept as secondary fallback for iNAV)
+# BSE LIVE iNAV  (secondary fallback during market hours)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _BSE_INAV_CACHE:      list  = []
@@ -895,7 +804,7 @@ def _get_bse_inav_list() -> list:
     return _BSE_INAV_CACHE
 
 
-def _fetch_inav_bse_for_symbol(symbol: str) -> float | None:
+def _fetch_inav_bse_for_symbol(symbol: str):
     for item in _get_bse_inav_list():
         name = str(item.get("scname", "")).upper()
         if symbol.upper() in name:
@@ -909,9 +818,8 @@ def _fetch_inav_bse_for_symbol(symbol: str) -> float | None:
                     pass
     return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Yahoo Finance — LTP, 52W H/L, Beta, P/E, Volume
+# YAHOO FINANCE — LTP, 52W H/L, BETA, P/E, VOLUME
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_yahoo_metrics(symbol: str) -> dict:
@@ -919,88 +827,58 @@ def fetch_yahoo_metrics(symbol: str) -> dict:
     info   = ticker.info or {}
     fi     = ticker.fast_info
 
-    # LTP — fast_info is quicker; fall back to recent history close
     ltp = getattr(fi, "last_price", None)
     if not ltp:
         hist = ticker.history(period="5d", interval="1d")
         ltp  = float(hist["Close"].iloc[-1]) if not hist.empty else None
 
-    # 52-week High / Low
     high_52w = getattr(fi, "year_high", None) or info.get("fiftyTwoWeekHigh")
     low_52w  = getattr(fi, "year_low",  None) or info.get("fiftyTwoWeekLow")
-
-    # Volume
-    volume = (
+    volume   = (
         getattr(fi, "last_volume", None)
         or info.get("regularMarketVolume")
         or getattr(fi, "three_month_average_volume", None)
         or info.get("averageVolume")
     )
-
-    # P/E
-    pe = info.get("trailingPE") or info.get("forwardPE")
-
-    # Beta
-    beta = info.get("beta") or info.get("beta3Year")
+    pe   = info.get("trailingPE") or info.get("forwardPE")
+    beta = info.get("beta")       or info.get("beta3Year")
 
     return {
         "ltp":      float(ltp)      if ltp      else None,
         "high_52w": float(high_52w) if high_52w else None,
         "low_52w":  float(low_52w)  if low_52w  else None,
         "beta":     float(beta)     if beta     else None,
-        "peg":      None,   # Not available for Indian ETFs from any free source
+        "peg":      None,
         "pe":       float(pe)       if pe       else None,
         "volume":   int(volume)     if volume   else None,
     }
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Combined fetch
+# COMBINED FETCH
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_all_data(symbol: str, isin: str) -> dict:
-    """
-    Fetch all metrics for one ETF.
-
-    iNAV / NAV priority (most to least live):
-      Market hours → NSE quote-equity API (iNavValue field)  [FIXED]
-                   → BSE iNAV API (secondary live fallback)
-      Any time     → mfapi.in latest NAV
-                   → AMFI NAVAll.txt (final fallback)
-
-    Expense ratio priority:  [FIXED]
-      1. mfdata.in  GET /api/v1/schemes/{amfi_code}  (primary, AMFI-sourced)
-      2. mf.captnemo.in  GET /search?q={isin}        (secondary fallback)
-
-    LTP / 52W / Beta / P/E / Volume: Yahoo Finance (.NS)
-    PEG ratio: not available for Indian ETFs from any free source → None
-    """
     metrics       = fetch_yahoo_metrics(symbol)
     expense_ratio = fetch_expense_ratio(isin)
     ltp           = metrics.get("ltp")
 
     nav, nav_date, is_live = None, "N/A", False
 
-    # Live iNAV during market hours — NSE quote-equity API (primary)
     if is_market_open():
         nav = fetch_inav_nse(symbol)
         if nav:
             nav_date, is_live = "live (NSE iNAV)", True
-
-        # BSE iNAV as secondary live source if NSE returned nothing
         if not nav:
             nav = _fetch_inav_bse_for_symbol(symbol)
             if nav:
                 nav_date, is_live = "live (BSE iNAV)", True
 
-    # Declared NAV fallback: mfapi.in
     if not nav:
         result = fetch_nav_mfapi(isin)
         if result:
             nav, nav_date = result
             nav_date = f"declared {nav_date} (mfapi)"
 
-    # Last resort: raw AMFI NAVAll.txt
     if not nav:
         result = fetch_nav_amfi_by_isin(isin)
         if result:
@@ -1018,14 +896,13 @@ def fetch_all_data(symbol: str, isin: str) -> dict:
         "is_live":       is_live,
     }
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Alerts
+# ALERTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _alert_body(symbol, meta, r):
     ltp, nav = r.get("ltp"), r.get("nav")
-    diff_pct = r.get("diff_pct", 0)
+    diff_pct  = r.get("diff_pct", 0)
     direction = "DISCOUNT" if diff_pct and diff_pct < 0 else "PREMIUM"
     return (
         f"ETF Alert: {symbol}  —  {meta['name']}\n"
@@ -1087,13 +964,12 @@ def send_alert(symbol, meta, r):
         except Exception as e:
             log.error("SMS failed: %s", e)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Cache
+# CACHE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def save_cache(symbol, data):
-    p = Path(CONFIG["cache_file"])
+    p     = Path(CONFIG["cache_file"])
     cache = {}
     if p.exists():
         try:
@@ -1106,148 +982,82 @@ def save_cache(symbol, data):
     except Exception as e:
         log.warning("Cache write failed: %s", e)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN  (single-cycle — GitHub Actions handles the 2-hour schedule)
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main loop
-# ─────────────────────────────────────────────────────────────────────────────
-"""
 def main():
     excel_path = CONFIG["excel_file"]
-    interval   = CONFIG["poll_interval_seconds"]
 
-    log.info("Multi-ETF Monitor (Excel-integrated)")
-    log.info("Excel file : %s", excel_path)
-    log.info("Poll every : %ds", interval)
-
-    last_alert_time:    dict[str, datetime | None] = {}
-    consecutive_errors: dict[str, int]             = {}
-
-    while True:
-        registry = load_etf_registry(excel_path)
-        if not registry:
-            log.error("No ETFs found in %s — sleeping and retrying.", excel_path)
-            time.sleep(60)
-            continue
-
-        for s in registry:
-            last_alert_time.setdefault(s, None)
-            consecutive_errors.setdefault(s, 0)
-
-        log.info("── Cycle start [market: %s]  %s",
-                 market_status_label(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-        results: dict[str, dict] = {}
-        to_remove = []
-
-        for symbol, meta in registry.items():
-            try:
-                r = fetch_all_data(symbol, meta["isin"])
-                save_cache(symbol, r)
-                results[symbol] = r
-                consecutive_errors[symbol] = 0
-
-                ltp, nav, diff_pct = r.get("ltp"), r.get("nav"), r.get("diff_pct")
-                log.info(
-                    "  %-12s  LTP=%-10s  NAV=%-10s  Diff=%s",
-                    symbol,
-                    f"₹{ltp:.4f}" if ltp else "N/A",
-                    f"₹{nav:.4f}" if nav else "N/A",
-                    f"{diff_pct:+.2f}%" if diff_pct is not None else "N/A",
-                )
-
-                # Alert check
-                threshold = meta["threshold_pct"]
-                if diff_pct is not None and abs(diff_pct) <= threshold:
-                    now  = datetime.now()
-                    last = last_alert_time.get(symbol)
-                    if last is None or (now - last).total_seconds() >= interval:
-                        log.info("  %-12s  ⚡ Threshold met — alerting!", symbol)
-                        send_alert(symbol, meta, r)
-                        last_alert_time[symbol] = now
-                    else:
-                        log.info("  %-12s  Alert in cooldown.", symbol)
-
-            except Exception as e:
-                consecutive_errors[symbol] += 1
-                log.error("  %-12s  ERROR (%d): %s",
-                          symbol, consecutive_errors[symbol], e)
-                results[symbol] = {}
-                if consecutive_errors[symbol] >= 10:
-                    log.error("  %-12s  Disabling after 10 consecutive errors.", symbol)
-                    to_remove.append(symbol)
-
-        for s in to_remove:
-            registry.pop(s, None)
-
-        try:
-            write_results_to_excel(excel_path, registry, results)
-        except Exception as e:
-            log.error("Excel write failed: %s", e)
-
-        log.info("── Sleeping %ds …\n", interval)
-        time.sleep(interval)
-
-
-if __name__ == "__main__":
-    main()
-"""
-def main():
-    excel_path = CONFIG["excel_file"]   # just a local temp path e.g. "etf_data_amfi1.xlsx"
-
+    log.info("═" * 60)
     log.info("Multi-ETF Monitor — GitHub Actions single-cycle run")
+    log.info("Market status : %s", market_status_label())
+    log.info("Run time (UTC): %s", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+    log.info("═" * 60)
 
-    # ── 1. Pull latest Excel from Drive ──────────────────────────────────
-    download_excel_from_drive(excel_path)
+    # ── STEP 1 : Download latest Excel from Google Drive ─────────────────
+    try:
+        download_excel_from_drive(excel_path)
+    except RuntimeError as e:
+        # Clear, actionable error — do not swallow it
+        log.error("FATAL — could not download Excel from Drive:\n%s", e)
+        raise SystemExit(1)
 
-    # ── 2. Load registry ─────────────────────────────────────────────────
+    # ── STEP 2 : Load ETF registry ────────────────────────────────────────
     registry = load_etf_registry(excel_path)
     if not registry:
-        log.error("No ETFs in Excel — aborting.")
-        return
+        log.error("No ETFs found in Excel — nothing to process. Aborting.")
+        raise SystemExit(1)
 
-    last_alert_time:    dict[str, datetime | None] = {s: None for s in registry}
-    consecutive_errors: dict[str, int]             = {s: 0    for s in registry}
+    consecutive_errors: dict[str, int] = {s: 0 for s in registry}
 
-    log.info("── Single cycle [market: %s]  %s",
-             market_status_label(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
+    # ── STEP 3 : Fetch data for each ETF ─────────────────────────────────
     results: dict[str, dict] = {}
-
     for symbol, meta in registry.items():
         try:
             r = fetch_all_data(symbol, meta["isin"])
             save_cache(symbol, r)
             results[symbol] = r
+            consecutive_errors[symbol] = 0
 
             ltp, nav, diff_pct = r.get("ltp"), r.get("nav"), r.get("diff_pct")
             log.info(
-                "  %-12s  LTP=%-10s  NAV=%-10s  Diff=%s",
+                "  %-14s  LTP=%-12s  NAV=%-12s  Diff=%s",
                 symbol,
-                f"₹{ltp:.4f}" if ltp else "N/A",
-                f"₹{nav:.4f}" if nav else "N/A",
+                f"₹{ltp:.4f}"       if ltp      is not None else "N/A",
+                f"₹{nav:.4f}"       if nav      is not None else "N/A",
                 f"{diff_pct:+.2f}%" if diff_pct is not None else "N/A",
             )
 
-            # Alert check
+            # Alert check — fire if LTP/NAV diff is within threshold
             threshold = meta["threshold_pct"]
             if diff_pct is not None and abs(diff_pct) <= threshold:
-                log.info("  %-12s  ⚡ Threshold met — alerting!", symbol)
+                log.info("  %-14s  ⚡ Threshold met (%.2f%% ≤ %.2f%%) — alerting!",
+                         symbol, abs(diff_pct), threshold)
                 send_alert(symbol, meta, r)
 
         except Exception as e:
             consecutive_errors[symbol] += 1
-            log.error("  %-12s  ERROR: %s", symbol, e)
+            log.error("  %-14s  ERROR: %s", symbol, e)
             results[symbol] = {}
 
-    # ── 3. Write Excel locally ────────────────────────────────────────────
+    # ── STEP 4 : Write results to Excel (local) ───────────────────────────
     try:
         write_results_to_excel(excel_path, registry, results)
     except Exception as e:
-        log.error("Excel write failed: %s", e)
-        return
+        log.error("FATAL — Excel write failed: %s", e)
+        raise SystemExit(1)
 
-    # ── 4. Push updated Excel back to Drive ───────────────────────────────
-    upload_excel_to_drive(excel_path)
+    # ── STEP 5 : Upload updated Excel back to Google Drive ────────────────
+    try:
+        upload_excel_to_drive(excel_path)
+    except Exception as e:
+        log.error("FATAL — could not upload Excel to Drive: %s", e)
+        raise SystemExit(1)
+
+    log.info("═" * 60)
+    log.info("Cycle complete. Excel updated in Google Drive.")
+    log.info("═" * 60)
 
 
 if __name__ == "__main__":
