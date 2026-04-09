@@ -35,6 +35,51 @@ import yfinance as yf
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+# pip install google-api-python-client google-auth
+import os
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from google.oauth2 import service_account
+import io
+
+DRIVE_FILE_ID = os.getenv("GDRIVE_FILE_ID")   # stored as GitHub Secret
+GDRIVE_CREDS  = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")  # JSON string as GitHub Secret
+
+def _get_drive_service():
+    import json
+    creds_dict = json.loads(GDRIVE_CREDS)
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/drive.file"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+
+def download_excel_from_drive(local_path: str):
+    """Download the Excel file from Drive to local runner before processing."""
+    service = _get_drive_service()
+    request = service.files().get_media(fileId=DRIVE_FILE_ID)
+    with open(local_path, "wb") as f:
+        downloader = MediaIoBaseDownload(f, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+    log.info("Downloaded Excel from Google Drive → %s", local_path)
+
+
+def upload_excel_to_drive(local_path: str):
+    """Upload the updated Excel file back to the same Drive file (overwrites)."""
+    service = _get_drive_service()
+    media = MediaFileUpload(
+        local_path,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        resumable=True
+    )
+    service.files().update(
+        fileId=DRIVE_FILE_ID,
+        media_body=media
+    ).execute()
+    log.info("Uploaded updated Excel back to Google Drive (file ID: %s)", DRIVE_FILE_ID)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENV / CREDENTIALS
@@ -1065,7 +1110,7 @@ def save_cache(symbol, data):
 # ─────────────────────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────────────────────
-
+"""
 def main():
     excel_path = CONFIG["excel_file"]
     interval   = CONFIG["poll_interval_seconds"]
@@ -1141,6 +1186,68 @@ def main():
 
         log.info("── Sleeping %ds …\n", interval)
         time.sleep(interval)
+
+
+if __name__ == "__main__":
+    main()
+"""
+def main():
+    excel_path = CONFIG["excel_file"]   # just a local temp path e.g. "etf_data_amfi1.xlsx"
+
+    log.info("Multi-ETF Monitor — GitHub Actions single-cycle run")
+
+    # ── 1. Pull latest Excel from Drive ──────────────────────────────────
+    download_excel_from_drive(excel_path)
+
+    # ── 2. Load registry ─────────────────────────────────────────────────
+    registry = load_etf_registry(excel_path)
+    if not registry:
+        log.error("No ETFs in Excel — aborting.")
+        return
+
+    last_alert_time:    dict[str, datetime | None] = {s: None for s in registry}
+    consecutive_errors: dict[str, int]             = {s: 0    for s in registry}
+
+    log.info("── Single cycle [market: %s]  %s",
+             market_status_label(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    results: dict[str, dict] = {}
+
+    for symbol, meta in registry.items():
+        try:
+            r = fetch_all_data(symbol, meta["isin"])
+            save_cache(symbol, r)
+            results[symbol] = r
+
+            ltp, nav, diff_pct = r.get("ltp"), r.get("nav"), r.get("diff_pct")
+            log.info(
+                "  %-12s  LTP=%-10s  NAV=%-10s  Diff=%s",
+                symbol,
+                f"₹{ltp:.4f}" if ltp else "N/A",
+                f"₹{nav:.4f}" if nav else "N/A",
+                f"{diff_pct:+.2f}%" if diff_pct is not None else "N/A",
+            )
+
+            # Alert check
+            threshold = meta["threshold_pct"]
+            if diff_pct is not None and abs(diff_pct) <= threshold:
+                log.info("  %-12s  ⚡ Threshold met — alerting!", symbol)
+                send_alert(symbol, meta, r)
+
+        except Exception as e:
+            consecutive_errors[symbol] += 1
+            log.error("  %-12s  ERROR: %s", symbol, e)
+            results[symbol] = {}
+
+    # ── 3. Write Excel locally ────────────────────────────────────────────
+    try:
+        write_results_to_excel(excel_path, registry, results)
+    except Exception as e:
+        log.error("Excel write failed: %s", e)
+        return
+
+    # ── 4. Push updated Excel back to Drive ───────────────────────────────
+    upload_excel_to_drive(excel_path)
 
 
 if __name__ == "__main__":
