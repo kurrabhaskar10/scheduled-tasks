@@ -163,7 +163,7 @@ def _get_drive_service():
 
     creds = service_account.Credentials.from_service_account_info(
         creds_dict,
-        scopes=["https://www.googleapis.com/auth/drive.file"],
+        scopes=["https://www.googleapis.com/auth/drive"],
     )
     return build("drive", "v3", credentials=creds)
 
