@@ -63,9 +63,7 @@ def interpret_mf_cash(pct): return ("Neutral Positioning", "Neutral")
 # EMAIL SENDER
 # ─────────────────────────────────────────────────────────────────────────────
 # IMPORTANT: keep regex all on one line
-ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|
-
-\[[0-?]*[ -/]*[@-~])')
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|[[0-?]*[ -/]*[@-~])')
 
 def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub('', text)
