@@ -62,14 +62,54 @@ def _color(text, color): return f"{color}{text}{RESET}"
 def _bold(text):         return f"{BOLD}{text}{RESET}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Indicators (keep your existing indicator functions here unchanged)
+# Indicators (paste your existing indicator functions here unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
-# ... paste all your get_pct_above_200dma, get_mcap_gdp, get_nifty_pe, etc. functions here ...
+# Example placeholder:
+def get_dummy_indicator():
+    return {"value": 42, "source": "Dummy"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EMAIL SENDER
 # ─────────────────────────────────────────────────────────────────────────────
-# Correct regex: fully closed string, no newline inside
+# Correct regex: all on one line, properly closed
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|
 
-\[[0-?]*[ -/]*[@-
+\[[0-?]*[ -/]*[@-~])')
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE.sub('', text)
+
+def send_email_report(subject: str, body: str):
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = my_email
+    msg["To"] = my_email
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(my_email, my_password)
+            server.send_message(msg)
+        print(f"Report emailed successfully to {my_email}")
+    except Exception as e:
+        print(f"⚠ Failed to send email: {e}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    buffer = StringIO()
+    with contextlib.redirect_stdout(buffer):
+        # your existing reporting logic goes here
+        print(f"\n{_bold(_color('=' * 68, CYAN))}")
+        print(f"  {_bold(_color('MARKET INDICATORS SUMMARY REPORT', WHITE))}")
+        print(f"  {_color(datetime.now().strftime('%d %B %Y  %H:%M:%S'), YELLOW)}")
+        print(f"{_bold(_color('=' * 68, CYAN))}")
+        print(f"  {_color('Initialising NSE session ...', CYAN)}")
+        _init_nse_session()
+        # ... call each indicator and print results as in your original code ...
+
+    raw_report = buffer.getvalue()
+    clean_report = strip_ansi(raw_report)
+    send_email_report("Market Indicators Summary Report", clean_report)
+
+if __name__ == "__main__":
+    main()
