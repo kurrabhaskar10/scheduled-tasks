@@ -1,6 +1,6 @@
 """
-market_indicators_summary.py
-=============================
+market_indicators_summary_email.py
+==================================
 Fetches live / latest data for each indicator in the
 "Percentage of stocks with Price above 200 DMA" report and
 prints a consolidated summary with interpretation and suggested action,
@@ -20,8 +20,8 @@ from datetime import date, datetime
 # ─────────────────────────────────────────────────────────────────────────────
 # ENV / CREDENTIALS
 # ─────────────────────────────────────────────────────────────────────────────
-my_email            = os.getenv("MY_EMAIL")
-my_password         = os.getenv("MY_EMAIL_PSWRD")
+my_email    = os.getenv("MY_EMAIL")
+my_password = os.getenv("MY_EMAIL_PSWRD")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared session — NSE requires a cookie from the home page
@@ -64,22 +64,12 @@ def _bold(text):         return f"{BOLD}{text}{RESET}"
 # ─────────────────────────────────────────────────────────────────────────────
 # Indicators (keep your existing indicator functions here unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
-# ... all your get_pct_above_200dma, get_mcap_gdp, get_nifty_pe, etc. functions ...
+# ... paste all your get_pct_above_200dma, get_mcap_gdp, get_nifty_pe, etc. functions here ...
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EMAIL SENDER
 # ─────────────────────────────────────────────────────────────────────────────
+# Correct regex: fully closed string, no newline inside
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|
 
-\[[0-?]*[ -/]*[@-~])')
-
-def strip_ansi(text: str) -> str:
-    return ANSI_ESCAPE.sub('', text)
-
-def send_email_report(subject: str, body: str):
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = my_email
-    msg["To"] = my_email
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail
+\[[0-?]*[ -/]*[@-
