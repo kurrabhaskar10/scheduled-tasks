@@ -62,6 +62,7 @@ def interpret_mf_cash(pct): return ("Neutral Positioning", "Neutral")
 # ─────────────────────────────────────────────────────────────────────────────
 # EMAIL SENDER
 # ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT: keep regex all on one line
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|
 
 \[[0-?]*[ -/]*[@-~])')
