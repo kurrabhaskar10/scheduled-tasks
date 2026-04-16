@@ -7,7 +7,7 @@ on:
   workflow_dispatch:  # Allows manual trigger
 
 jobs:
-  send-etfalerts-emails:
+  send-Market-Indicators-alert-emails:
     runs-on: ubuntu-latest
     
     steps:
