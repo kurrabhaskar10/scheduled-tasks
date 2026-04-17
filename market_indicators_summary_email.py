@@ -462,7 +462,9 @@ def print_results(results: dict):
 
     for i, (key, d) in enumerate(results.items(), 1):
         print(f"\n{_b(_c('─' * 68, CYAN))}")
-        print(f"  {_b(_c(f'{i}. {d[\"title\"]}', WHITE))}")
+#        print(f"  {_b(_c(f'{i}. {d[\"title\"]}', WHITE))}")
+        title = d["title"]
+        print(f"  {_b(_c(f'{i}. {title}', WHITE))}")
         print(f"{_b(_c('─' * 68, CYAN))}")
         print(f"  {'Value':<12}: {_b(d['value'])}")
         print(f"  {'Condition':<12}: {_c(d['condition'], YELLOW)}")
