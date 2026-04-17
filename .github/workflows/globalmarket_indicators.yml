@@ -1,5 +1,5 @@
 
-name: Market Indicators summary Emailer
+name: Global Market Indicators summary Emailer
 
 on:
   schedule:
