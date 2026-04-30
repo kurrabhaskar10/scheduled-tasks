@@ -37,7 +37,7 @@ from email.mime.text import MIMEText
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 MY_EMAIL    = os.environ["MY_EMAIL"]
-MY_PASSWORD = os.environ["MY_PASSWORD"]
+MY_PASSWORD = os.environ["MY_EMAIL_PSWRD"]
 
 # Yahoo Finance tickers (index tickers that Yahoo actually carries)
 YF_INDICES = {
