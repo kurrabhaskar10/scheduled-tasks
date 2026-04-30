@@ -1,5 +1,5 @@
 
-name: Nifrty Index levels summary Emailer
+name: Nifty Index levels summary Emailer
 
 on:
   schedule:
