@@ -1,5 +1,5 @@
 
-name: Global Market Indicators summary Emailer
+name: Nifrty Index levels summary Emailer
 
 on:
   schedule:
