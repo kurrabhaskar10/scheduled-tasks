@@ -1,5 +1,5 @@
 
-name: Nifty Index levels summary Emailer
+name: hdfc_nav_tracker Emailer
 
 on:
   schedule:
